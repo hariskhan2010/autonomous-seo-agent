@@ -1,0 +1,23 @@
+# Tier-2/3 headless-browser rendering (seo_core.crawl.render, Phase 2/13) — a SEPARATE image from
+# Dockerfile.api: Chromium + its OS-level dependencies (fonts, libnss3, libatk, ...) would bloat
+# every other service for a capability only this one needs. Uses Playwright's own base image,
+# which ships Chromium and those dependencies pre-installed and version-matched to the `playwright`
+# Python package pinned in pyproject.toml.
+FROM mcr.microsoft.com/playwright/python:v1.49.0-noble
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+COPY pyproject.toml uv.lock* ./
+RUN uv sync --frozen --no-dev || uv sync --no-dev
+
+COPY packages ./packages
+COPY apps ./apps
+COPY integrations ./integrations
+
+ENV PYTHONPATH=/app/packages:/app/apps/api:/app/apps/worker
+# Consumes ONLY the `render` queue (see infra/docker-compose.yml's `task_routes`) — the
+# lightweight `worker` service explicitly excludes it, so a Tier-2 job never lands on a container
+# without a browser, and Tier-1-only deployments never need this image at all.
+CMD ["uv", "run", "celery", "-A", "worker.app.celery_app", "worker", "-Q", "render", "-l", "INFO"]

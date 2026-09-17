@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push: { branches: [main] }
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: seo }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s
+          --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+    env:
+      # Runtime role = seo_app (NOBYPASSRLS). Migrator = postgres superuser.
+      DATABASE_URL: postgresql+psycopg://seo_app:seo_app_dev@localhost:5432/seo
+      DATABASE_URL_MIGRATOR: postgresql+psycopg://postgres:postgres@localhost:5432/seo
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: { python-version: "3.13" }
+      - run: uv sync
+
+      - name: Provision DB roles (Neon does this out-of-band)
+        env: { PGPASSWORD: postgres }
+        run: psql -h localhost -U postgres -d seo -v ON_ERROR_STOP=1 -f infra/db-init/01-init.sql
+
+      - name: Lint
+        run: uv run ruff check .
+      - name: Type-check
+        run: uv run mypy packages apps integrations
+      - name: Secret scan
+        run: |
+          uv run detect-secrets scan --baseline .secrets.baseline
+          git diff --exit-code .secrets.baseline
+      - name: Dependency vulnerability scan
+        run: uvx pip-audit --local  # blocking as of the Phase 13 hardening pass (was advisory-only)
+      - name: Migrations up + down + up + models-in-sync
+        run: |
+          uv run alembic -c database/alembic.ini upgrade head
+          uv run alembic -c database/alembic.ini downgrade base
+          uv run alembic -c database/alembic.ini upgrade head
+          uv run alembic -c database/alembic.ini check
+      - name: Tests
+        run: uv run pytest --cov=packages --cov=apps
+      - name: Eval scorecards (smoke)
+        run: uv run pytest tests/eval -q

@@ -1,0 +1,56 @@
+# Logical model roles → provider/model/version + fallbacks (ADR-0005, A-TO-Z-PLAN.md §H.1).
+# Code references ROLES only. Swapping a provider is an edit here + an ADR — no code change.
+# Per-tenant overrides live in the `model_registry` DB table from Phase 12.
+
+version: 1
+
+roles:
+  # Free-tier strategy (NEEDED-KEYS.md): Gemini for STRATEGY/WORKER, OpenRouter (a genuinely
+  # different provider/model family) for JUDGE, Zhipu/GLM for FAST. Swap to anthropic/openai
+  # bindings (still supported — see providers/anthropic_provider.py) once on a paid tier; nothing
+  # else in the codebase needs to change, only this file.
+  STRATEGY:
+    provider: gemini
+    model: gemini-2.5-flash
+    model_version: pinned
+    fallbacks: [{ role: WORKER }]
+    max_output_tokens: 8000
+
+  WORKER:
+    provider: gemini
+    model: gemini-2.5-flash
+    model_version: pinned
+    fallbacks: [{ role: FAST }]
+    max_output_tokens: 8000
+
+  FAST:
+    provider: zhipu
+    # NOT `glm-4-flash` — that name 404s against the current API; `glm-4.5-flash` is the live
+    # free-tier flash model (verified against a real key while wiring this up).
+    model: glm-4.5-flash
+    model_version: glm-4.5-flash
+    fallbacks: [{ role: WORKER }]
+    max_output_tokens: 2000
+
+  JUDGE:
+    # MUST be a different model family than WORKER (bias control) — loader asserts this via
+    # `Binding.family` (== provider). `openrouter` != `gemini`, so this passes; picked a
+    # non-Google model on OpenRouter specifically to keep the underlying model lineage distinct
+    # too, not just the routing provider.
+    provider: openrouter
+    model: nvidia/nemotron-3-super-120b-a12b:free
+    model_version: pinned
+    fallbacks: [{ role: STRATEGY }]
+    max_output_tokens: 4000
+
+  EMBEDDING:
+    provider: local                   # sentence-transformers bge-small — free, no key (MVP)
+    model: bge-small-en-v1.5
+    model_version: bge-small-en-v1.5
+    fallbacks: []                     # jobs pause; lexical retrieval continues
+    dim: 384
+
+budgets:
+  per_call_input_tokens: 180000
+  per_run_cost_usd: 5.0
+  per_tenant_month_cost_usd: 300.0

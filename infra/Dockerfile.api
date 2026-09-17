@@ -1,0 +1,19 @@
+# Shared image for api + worker.
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+WORKDIR /app
+COPY pyproject.toml uv.lock* ./
+RUN uv sync --frozen --no-dev || uv sync --no-dev
+
+COPY packages ./packages
+COPY apps ./apps
+COPY integrations ./integrations
+COPY database ./database
+COPY config ./config
+
+ENV PYTHONPATH=/app/packages:/app/apps/api:/app/apps/worker
+EXPOSE 8000
+CMD ["uv", "run", "uvicorn", "app.main:app", "--app-dir", "apps/api", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,0 +1,43 @@
+"""Import every model module so `Base.metadata` is complete for Alembic autogenerate."""
+
+from db.models import (
+    analytics,
+    audit,
+    content,
+    crawl,
+    credential,
+    events,
+    evidence,
+    geo,
+    graph,
+    identity,
+    issues,
+    keywords,
+    opportunity,
+    ops,
+    project,
+    runtime,
+    safety,
+    serp,
+)
+
+__all__ = [
+    "analytics",
+    "audit",
+    "content",
+    "crawl",
+    "credential",
+    "evidence",
+    "events",
+    "geo",
+    "graph",
+    "identity",
+    "issues",
+    "keywords",
+    "opportunity",
+    "ops",
+    "project",
+    "runtime",
+    "safety",
+    "serp",
+]
