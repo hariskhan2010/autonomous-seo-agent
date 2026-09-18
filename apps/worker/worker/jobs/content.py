@@ -25,6 +25,7 @@ from seo_core.content import (
     classify_content_type,
     content_flags,
     rule_judge,
+    score_crawled_page,
 )
 from seo_core.content.judge import RUBRIC_DIMENSIONS, RubricScore
 from seo_core.content.signals import ContentRow
@@ -181,15 +182,20 @@ def run(tenant_id: str, project_id: str, crawl_run_id: str,
                 s.flush()
             upserts += 1
 
-            # Text proxy from parsed fields; full-body scoring reads the snapshot's raw_key later.
-            text_proxy = " ".join(filter(None, [
-                r.title, r.meta_description, r.h1,
-                *(h for hs in (r.headings or {}).values() for h in hs),
-            ]))
-            rj = rule_judge(text_proxy, keyword=None, target_words=max(1, r.word_count or 700))
+            # `rule_judge`/`score_article` checks Markdown syntax against a target taken from
+            # the page's own word count — it's for judging LLM-drafted Markdown before publish,
+            # not live HTML (see score_crawled_page's docstring). Score already-crawled pages
+            # from their real structured fields instead.
+            qs = score_crawled_page(
+                word_count=r.word_count, content_type=ctype,
+                heading_count=sum(len(hs) for hs in (r.headings or {}).values()),
+                internal_link_count=len(r.internal_links or []),
+                has_schema=bool(r.schema_blocks),
+                meta_description_length=len(r.meta_description or ""),
+            )
             s.add(ContentScore(
                 tenant_id=tid, project_id=pid, content_item_id=item.id, scorer="rule",
-                score=rj.score, verdict=rj.verdict, dimensions=rj.dimensions,
+                score=qs.score, verdict=qs.verdict, dimensions=qs.checks,
             ))
 
         groups = cannibalization_groups(rows)
