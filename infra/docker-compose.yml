@@ -69,6 +69,20 @@ services:
       db: { condition: service_healthy }
     profiles: ["full"]
 
+  # Phase 11: the periodic trigger for `scheduler.tick` + `events.relay` (worker/beat.py). Run
+  # exactly ONE beat instance — two would double-fire every tick. Which projects it fires for
+  # comes from BEAT_TARGETS in .env (`tenant_uuid:project_uuid,...`); intervals from
+  # BEAT_SCHEDULER_TICK_SECONDS / BEAT_EVENTS_RELAY_SECONDS. It only enqueues; `worker` executes.
+  beat:
+    build: { context: .., dockerfile: infra/Dockerfile.api }
+    command: celery -A worker.app.celery_app beat -l INFO --schedule /tmp/celerybeat-schedule
+    env_file: [../.env]
+    environment:
+      PYTHONPATH: /app/packages:/app/apps/api:/app/apps/worker
+    depends_on:
+      redis: { condition: service_healthy }
+    profiles: ["full"]
+
   # Tier-2 headless-browser rendering (Phase 2/13) — the only service with Chromium; consumes
   # ONLY the `render` queue. Scale this independently from `worker` (browsers are far more
   # expensive per job than a plain HTTP fetch).

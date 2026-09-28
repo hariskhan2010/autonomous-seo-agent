@@ -72,6 +72,15 @@ class Settings(BaseSettings):
     slack_bot_token: str = ""  # noqa: S105
     slack_signing_secret: str = ""  # noqa: S105
 
+    # ── Phase 11 — Celery beat (worker/beat.py) ──
+    # Which projects the periodic `scheduler.tick` / `events.relay` fire for: comma-separated
+    # `tenant_uuid:project_uuid` pairs. Explicit on purpose — the runtime role is NOBYPASSRLS,
+    # so beat cannot (and must not) enumerate every tenant's projects itself. Empty = no
+    # periodic entries (beat runs but schedules nothing).
+    beat_targets: str = ""
+    beat_scheduler_tick_seconds: float = Field(default=60.0, gt=0)
+    beat_events_relay_seconds: float = Field(default=15.0, gt=0)
+
     # ── Phase 2 ──
     s3_endpoint: str = "http://localhost:9000"
     s3_access_key: str = "minioadmin"
