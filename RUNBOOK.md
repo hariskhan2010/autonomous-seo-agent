@@ -50,6 +50,12 @@ PATCH /v1/projects/{project_id}/oauth/google/config  -> {"ga4_property_id": "pro
 POST /v1/projects/{project_id}/oauth/google/revoke   -> disconnects (best-effort revoke at Google too)
 ```
 
+**The user's browser must call `/start` itself** (a `fetch(..., {credentials: "include"})` to the
+API origin, or a navigation there) and finish the Google consent in that same browser: `/start`
+sets an HttpOnly nonce cookie that `/callback` requires (login-CSRF defense). If a server calls
+`/start` on the user's behalf, the cookie never reaches the browser and the callback returns
+"finish the connect flow in the same browser that started it".
+
 Once connected, `metrics.ingest` (`worker.jobs.analytics.ingest`) resolves the stored, encrypted
 refresh token automatically — no need to pass one explicitly unless testing against a
 different/temporary connection. Reconnecting (running `/start` again) automatically revokes the
@@ -126,3 +132,25 @@ switch stops new actions, it does not undo one already applied.
 `.secrets.baseline`, `pip-audit`, a full migration up→down→up→models-in-sync check, `pytest`, and
 the eval scorecard smoke suite (`.github/workflows/ci.yml`). None of these are advisory — a red CI
 run blocks the deploy.
+
+## 9. Backup & restore (Neon branching)
+
+Neon keeps history for the project (`hidden-cherry-91348040`); a restore is a **new branch**, never
+an in-place overwrite, so the damaged `main` stays available for forensics.
+
+1. Neon console → Branches → **Create branch** from `main`, either at the current head or at a
+   point in time just before the incident (within the plan's history window). Or ask Claude to use
+   the Neon MCP `create_branch` / `restore_snapshot`.
+2. Verify the copy before pointing anything at it — same query as the drill below: alembic head,
+   table count, `FORCE` RLS on every table, `seo_app`/`seo_readonly` still `NOBYPASSRLS`, and row
+   counts for the tables that matter.
+3. Cut over: point `DATABASE_URL` / `DATABASE_URL_MIGRATOR` at the new branch's endpoint (or make it
+   the default branch), restart api/worker/beat/temporal-worker.
+4. Stored OAuth refresh tokens are encrypted with `ENCRYPTION_KEY` — a restore is useless without
+   the same key, so the key must be backed up separately from the database.
+
+**Drill, 2026-09-29:** branch `restore-drill-2026-09-29` created from `main` head; queryable in
+~10 s; alembic head `f6f34c89b75f`, 64 tables, 60 RLS policies (all 60 `FORCE`), row counts
+(tenants 2, projects 2, oauth_credentials 2, outbox_events 20) and both runtime roles
+`NOBYPASSRLS` — all identical to `main`. Not exercised: point-in-time (pre-head) restore, the
+cut-over step, and decrypting a restored OAuth token.
