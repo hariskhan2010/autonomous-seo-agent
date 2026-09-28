@@ -99,11 +99,17 @@ roles end-to-end with real network calls using the real keys now in `.env`. Foun
 `glm-4-flash` (what the docs referenced) 404s against the current Zhipu API — `glm-4.5-flash` is
 the live free-tier model.
 
-**Remaining is genuinely credential/infra-gated** (NEEDED-KEYS.md + docs/BUILD-LOG.md "Honest
+**SerpAPI key set + verified (2026-09-17).** **Celery beat, cursor pagination +
+`Idempotency-Key` (2026-09-28)** — see docs/BUILD-LOG.md; beat needs `BEAT_TARGETS` in `.env`.
+
+**Remaining is genuinely credential/infra-gated** (TOMORROW.md + docs/BUILD-LOG.md "Honest
 status"): `PAGESPEED_API_KEY` + `CRUX_API_KEY` (same GCP project as the OAuth client, already
-created), a SerpAPI/DataForSEO key, a repo token for the Git-PR adapter, and a running Temporal
-server (`make up-temporal`, needs Docker — currently blocked locally on a full disk, unrelated to
-the code) or Temporal Cloud.
+created), a repo token for the Git-PR adapter, and a running Temporal server — locally the
+`temporalio/auto-setup` container crashes on startup (not yet root-caused, see TOMORROW.md) — or
+Temporal Cloud.
+
+**Secrets baseline**: CI diffs `.secrets.baseline` against a Linux rescan, so it must use POSIX
+paths. If you regenerate it on Windows, convert `\\` → `/` in every filename before committing.
 
 ## API auth (dev)
 No Supabase needed locally: send headers `X-Dev-Tenant`, `X-Dev-User` (uuids), optional
