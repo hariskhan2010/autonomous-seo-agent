@@ -480,9 +480,22 @@ the Docker image path itself is not yet run.
   **Contract change:** the browser itself must call `/start` (`fetch(..., {credentials:
   "include"})` or a navigation to the API origin) — a server-side call drops the cookie.
 
-**Not covered:**
-- Crawler (SSRF guard, Tier-2 per-request re-check) was not re-reviewed in this pass — it relies
-  on its existing test suites (`test_ssrf*`, `test_render_guard.py`). Still worth a dedicated look.
+**Crawler review (same day)** — with `tests/unit/test_crawl_fetcher.py` (Tier 1 had no direct tests):
+- *High — IP pinning was documented but not implemented.* `fetch()` validated the resolved IP, then
+  handed the *hostname* URL to httpx, which resolved DNS again — a rebinding answer between the two
+  lookups could land the request on `127.0.0.1` / `169.254.169.254`. Every request (and every
+  redirect hop) now goes to the validated IP, with `Host` = the real name and httpcore's
+  `sni_hostname` so SNI and certificate verification still use the real name; `Connection: close`
+  stops the IP-keyed pool reusing a TLS session verified for a different host. Verified live:
+  example.com / wikipedia.org / github.com (http->https redirect) fetch fine, and
+  wrong.host.badssl.com + self-signed.badssl.com are still rejected.
+- *Medium — the 10 MB body cap was ineffective.* `client.request()` buffers the whole body before
+  `aiter_bytes()` runs; now `client.send(..., stream=True)` so the cap cuts the download off.
+- Checked, not an issue: IPv6 forms embedding IPv4 (6to4, Teredo, NAT64) — the stdlib already
+  classes them private/reserved, so `_ip_is_blocked` refuses them wholesale (regression-tested).
+- *Residual (Tier 2):* Chromium does its own DNS, so the per-request `page.route` re-check can't pin
+  an IP the way Tier 1 now does — a rebinding window remains in the browser tier. Mitigation if
+  needed: launch Chromium with `--host-resolver-rules` mapping the validated host to its IP.
 
 ---
 
@@ -510,7 +523,7 @@ the whole repo committed to git.
 | OTel export + dashboards | exporter hookup + Grafana panels need an OTLP backend endpoint/key |
 | Load test | not run |
 | Backup / restore drill | not run (Neon branch restore is the likely mechanism) |
-| Crawler SSRF / Tier-2 guard re-review | not re-reviewed in the 2026-09-29 security pass |
+| Tier-2 (browser) DNS-rebinding window | Chromium resolves DNS itself; pin via `--host-resolver-rules` if it matters — see 2026-09-29 entry |
 
 The architecture, schema, engines and the full safety/execution loop are in place and tested;
 what remains is live-credential/infra integration and the Phase 13 launch-readiness work above.
