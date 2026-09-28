@@ -497,6 +497,19 @@ the Docker image path itself is not yet run.
   an IP the way Tier 1 now does — a rebinding window remains in the browser tier. Mitigation if
   needed: launch Chromium with `--host-resolver-rules` mapping the validated host to its IP.
 
+**Backup/restore drill (same day):** Neon branch `restore-drill-2026-09-29` from `main` head,
+queryable in ~10 s; alembic head, 64 tables, 60 `FORCE`-RLS policies, row counts and the
+`NOBYPASSRLS` runtime roles all identical to `main`. Procedure in `RUNBOOK.md` §9.
+
+**Load test (same day):** `scripts/loadtest.py` / `make loadtest` — read-only (GET) concurrent load
+over the list endpoints, per-endpoint p50/p95/p99 + error rate, non-zero exit on thresholds so it
+can gate a deploy. Smoke run from a dev PC against Neon us-east-2 (5 workers, 15 s): 0 errors, but
+~1.3 s per DB-backed request vs 4 ms for `/health` — measured `SELECT 1` round trip is ~250 ms, and
+a request makes ~5 sequential round trips (pool ping, BEGIN, tenant GUCs, query, COMMIT). So the
+number is geography, not the app; production must run in the DB's region. `tenant_session` now
+sets both GUCs in one statement (one round trip fewer on every request and job): mean 1450 ->
+1282 ms, p95 2925 -> 1975 ms on the same smoke run.
+
 ---
 
 ## Honest status — what "complete" means here
@@ -521,8 +534,8 @@ the whole repo committed to git.
 | Durable Temporal workflow running in prod (passes against a real local dev server) | Temporal Cloud credentials; locally `make up-temporal` / `make temporal-dev` (Docker path not yet run) |
 | Crawler Tier 3 (proxy rotation for bot-protected sites) | not built; needs a proxy provider (`PROXY_URL`/credentials) |
 | OTel export + dashboards | exporter hookup + Grafana panels need an OTLP backend endpoint/key |
-| Load test | not run |
-| Backup / restore drill | not run (Neon branch restore is the likely mechanism) |
+| Load test at production scale | tool built + smoke-run (`make loadtest`); needs the API deployed next to the DB to give meaningful numbers — see 2026-09-29 entry |
+| Backup/restore: point-in-time restore + cut-over | head-of-branch restore drilled 2026-09-29 (`RUNBOOK.md` §9); PITR and cut-over not yet exercised |
 | Tier-2 (browser) DNS-rebinding window | Chromium resolves DNS itself; pin via `--host-resolver-rules` if it matters — see 2026-09-29 entry |
 
 The architecture, schema, engines and the full safety/execution loop are in place and tested;

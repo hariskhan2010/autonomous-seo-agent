@@ -1,4 +1,4 @@
-.PHONY: up down up-temporal temporal-dev sync lint type test migrate api worker beat temporal-worker fmt
+.PHONY: up down up-temporal temporal-dev sync lint type test migrate api worker beat temporal-worker loadtest fmt
 
 up:       ; docker compose -f infra/docker-compose.yml up -d db redis minio
 # Adds the Temporal dev server + its UI on :8080 (ADR-0003, the durable autonomous loop).
@@ -20,3 +20,5 @@ worker:   ; PYTHONPATH=$$PWD:$$PWD/packages:$$PWD/apps/api:$$PWD/apps/worker uv 
 # come from BEAT_TARGETS / BEAT_*_SECONDS (see packages/common/settings.py, worker/beat.py).
 beat:     ; PYTHONPATH=$$PWD:$$PWD/packages:$$PWD/apps/api:$$PWD/apps/worker uv run celery -A worker.app.celery_app beat -l INFO
 temporal-worker: ; PYTHONPATH=$$PWD:$$PWD/packages:$$PWD/apps/api:$$PWD/apps/worker uv run python -m worker.temporal.run_worker
+# Read-only API load test (GET only) — e.g. make loadtest ARGS="--concurrency 20 --duration 60"
+loadtest: ; uv run python scripts/loadtest.py $(ARGS)
