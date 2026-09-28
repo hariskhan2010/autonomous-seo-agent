@@ -3,13 +3,15 @@ from __future__ import annotations
 import uuid
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from app import idempotency
 from app.auth import Principal
 from app.deps import get_db, require_role
+from app.idempotency import IdempotencyKeyHeader
 from app.schemas import ProjectConfig, ProjectCreate, ProjectOut, ProjectUpdate
 from db.models.identity import Tenant
 from db.models.project import Project
@@ -34,9 +36,16 @@ def list_projects(db: Session = Depends(get_db)) -> list[Project]:
 @router.post("", response_model=ProjectOut, status_code=status.HTTP_201_CREATED)
 def create_project(
     body: ProjectCreate,
+    response: Response,
+    idempotency_key: IdempotencyKeyHeader = None,
     principal: Principal = Depends(require_role("admin")),
     db: Session = Depends(get_db),
-) -> Project:
+) -> Project | dict[str, object]:
+    """Honors `Idempotency-Key` (see `app/idempotency.py`): a retry replays the first 201."""
+    idem = idempotency.begin(db, response, tenant_id=principal.tenant_id, scope="projects.create",
+                             key=idempotency_key, request=body.model_dump(mode="json"))
+    if idem.replayed:
+        return dict(idem.body)
     _ensure_tenant_row(db, principal)
     project = Project(
         tenant_id=principal.tenant_id,
@@ -50,6 +59,7 @@ def create_project(
         db.flush()
     except IntegrityError as exc:
         raise HTTPException(status.HTTP_409_CONFLICT, "slug already in use") from exc
+    idem.store(status.HTTP_201_CREATED, ProjectOut.model_validate(project).model_dump(mode="json"))
     return project
 
 

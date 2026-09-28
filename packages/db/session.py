@@ -50,13 +50,14 @@ def tenant_session(
     success, rolls back on error. GUCs are LOCAL — they vanish with the transaction."""
     session = _sessionmaker()()
     try:
+        # One statement, not two: every request and job opens a session, so each extra round trip
+        # to the database is paid on all of them.
         session.execute(
-            text("SELECT set_config('app.tenant_id', :t, true)"),
-            {"t": str(tenant_id)},
-        )
-        session.execute(
-            text("SELECT set_config('app.project_id', :p, true)"),
-            {"p": "" if project_id is None else str(project_id)},
+            text(
+                "SELECT set_config('app.tenant_id', :t, true), "
+                "set_config('app.project_id', :p, true)"
+            ),
+            {"t": str(tenant_id), "p": "" if project_id is None else str(project_id)},
         )
         yield session
         session.commit()

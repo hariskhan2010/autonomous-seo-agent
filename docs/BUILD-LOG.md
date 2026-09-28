@@ -316,7 +316,8 @@ One entry per phase as it lands. Milestone/DoD tables in `../A-TO-Z-PLAN.md` §S
 - **Integration test on Neon**: seed a crawl → `run_once` → `seo_issues` + `opportunities` +
   `plans` awaiting approval all produced unattended; `agent_run.state == awaiting_approval`.
   Scheduler test: due schedule fires + reschedules a week out.
-- **Deferred:** Celery beat wiring for the scheduler tick.
+- **Deferred:** Celery beat wiring for the scheduler tick. → **cleared 2026-09-28** (see
+  "Beat wiring + API pagination/idempotency" below).
 
 ### Phase 11 deferral cleared — the Temporal durable workflow (2026-09-12)
 `apps/worker/worker/temporal/`: `SeoAgentWorkflow` (ADR-0003) — the always-on OBSERVE→PLAN→
@@ -387,7 +388,8 @@ boundary (never autonomous, enforced independently in both `execution.approval.r
 - **Reporting engine** (`packages/reporting/`): deterministic Markdown executive + technical
   reports (performance deltas, priority opportunities, recent changes, AI-visibility, issues by
   severity). 2 unit tests. PDF/email = a wrapper added with the mail provider.
-- **Deferred:** cursor pagination + `Idempotency-Key` on the new endpoints (helper exists),
+- **Deferred:** ~~cursor pagination + `Idempotency-Key` on the new endpoints~~ (cleared
+  2026-09-28, see below),
   per-tenant API keys + quotas, competitors/backlinks endpoints, the Next.js dashboard (evolve
   a fresh Next.js dashboard wired to this API), Slack/email digests.
 
@@ -403,42 +405,138 @@ boundary (never autonomous, enforced independently in both `execution.approval.r
   panels, a dedicated `security-review` pass on the write path + crawler + auth, load test,
   backup/restore drill, `DEPLOYMENT.md` launch runbook.
 
+## Beat wiring + API pagination/idempotency — ✅ DONE (2026-09-28, branch `cloud/improvements`)
+
+Code-only pass — nothing here needs a live credential.
+
+- **Celery beat (Phase 11 deferral).** `worker/beat.py` builds `celery_app.conf.beat_schedule`:
+  one `scheduler.tick` + one `events.relay` entry per configured target. Targets are explicit
+  config (`BEAT_TARGETS=tenant_uuid:project_uuid,...`), not discovered — the runtime role is
+  NOBYPASSRLS and both tasks run inside `tenant_session`, so beat cannot (and must not) list every
+  tenant's projects itself. Intervals: `BEAT_SCHEDULER_TICK_SECONDS` (default 60) /
+  `BEAT_EVENTS_RELAY_SECONDS` (default 15), in `common.settings`. Each entry `expires` after its
+  own interval so a backed-up broker drops stale ticks instead of piling them up (both tasks are
+  idempotent). Malformed targets fail loudly at import. New `beat` compose service (profile
+  `full`; run exactly one) and `make beat`. 9 unit tests incl. a fresh-interpreter check that
+  env vars actually reach `celery_app.conf.beat_schedule`.
+- **Cursor pagination (Phase 12 deferral).** `app/pagination.py` — keyset over
+  `(sort_key DESC, id DESC)` with an opaque cursor scoped to the endpoint that minted it (a cursor
+  from `/changes` is a 400 on `/issues`). Wired into `/crawls`, `/issues`, `/keywords`,
+  `/anomalies`, `/experiments`, `/geo/visibility`, `/opportunities`, `/changes`. **Backward
+  compatible**: bodies stay bare arrays (the dashboard is unaffected); the next cursor is in the
+  `X-Next-Cursor` header + `Link: rel="next"`; omitting `limit`/`cursor` keeps the legacy full
+  listing (`/crawls` keeps its existing default `limit=20`). `/keywords` already had an object
+  body, so it gains a `next_cursor` field. `/issues` was previously unordered — it is now
+  newest-first. (There is no separate issues router; `/issues` lives in `data.py`.)
+- **`Idempotency-Key` (Phase 12 deferral).** The "helper" that existed was the `job_runs`
+  idempotency ledger (`db.models.runtime.JobRun`, migration 0001) — there was no request-level
+  function, so `app/idempotency.py` is a thin layer over that ledger, not a second store. The
+  ledger row is written in the same transaction as the endpoint's writes: same key + same request
+  → replay (same status, `Idempotent-Replayed: true`); same key + different request → 422; still
+  in flight → 409; a failed request rolls back with its row, so errors are never cached. Ledger
+  key = `api:` + sha256(tenant | scope | client key) — tenants/endpoints can't collide on the
+  globally-unique column and the raw key is never stored. Wired on `POST /projects`,
+  `POST /websites`, `POST /plans/{id}/approve` (a replayed approval neither writes a second
+  `Approval` nor re-signals Temporal).
+- Tests: 21 new unit tests (fake session, no DB) + 4 integration tests on real Postgres (keyset
+  walk with tied scores covers every row exactly once; approve replay writes one `Approval`;
+  failed request doesn't burn the key; cross-tenant key reuse is independent). Full suite run
+  locally against a throwaway PostgreSQL 16 + pgvector with the CI role setup
+  (`infra/db-init/01-init.sql`), migrations up → down → up → `alembic check` clean.
+- Docs: `docs/API.md` conventions updated to what is actually implemented; this "Honest status"
+  table rewritten (it still listed LLM keys, Google OAuth, Tier 2, the dashboard, SerpAPI and the
+  git commit as open — all done, see `CLAUDE.md` / `TOMORROW.md`).
+
+## Local Temporal + security review — ✅ DONE (2026-09-29, branch `cloud/improvements`)
+
+**Local Temporal:** `temporalio/auto-setup:1.24.2` (deprecated upstream, crashed with exit 2) is
+replaced by the Temporal CLI dev server (`server start-dev`, SQLite, UI on :8080); `temporal-ui`
+dropped. `make up-temporal` (Docker) or `make temporal-dev` (no Docker, needs the CLI). The
+`SeoAgentWorkflow` suite passes against a real dev server (`WorkflowEnvironment.start_local()`);
+the Docker image path itself is not yet run.
+
+**Security review (auth + write path)** — fixed, with `tests/unit/test_security_hardening.py`:
+- *Critical — fail-open config.* `env` defaulted to `dev` (enabling the `X-Dev-*` header bypass)
+  and `JWT_SECRET`/`APP_SECRET_KEY`/`WEBHOOK_SIGNING_SECRET`/`ENCRYPTION_KEY` defaulted to a public
+  placeholder, unchecked: a prod deploy missing any of them let anyone mint a JWT for any tenant, or
+  decrypt stored OAuth refresh tokens. Now `Settings` refuses to start outside dev/test unless all
+  four are real (>= 32 chars), and `Dockerfile.api`/`Dockerfile.playwright` default to `ENV=prod`
+  (compose still sets `ENV=dev` via `.env`).
+- *High — path traversal in execution adapters.* `LocalGitAdapter` joined `ChangeSpec.path`
+  unchecked (`../`, absolute paths, `.git/hooks/*` -> code execution via `post-commit`);
+  `GitHubPRAdapter` built API URLs from it. `safe_repo_path()` now rejects `..`, absolute/drive
+  paths, `.git/`, `.github/workflows/`; the local adapter also re-checks the resolved path stays in
+  the repo, before any git call.
+- *Medium — bearer tokens.* `exp` + `sub` now required (a token without `exp` never expired);
+  JWTs carrying a `purpose` claim (the OAuth `state`, same signing key) are refused as API tokens;
+  malformed `X-Dev-*` headers are a 400, not a 500.
+
+- *Medium — OAuth login-CSRF (fixed same day).* The Google OAuth `state` was signed and bound to
+  tenant/project/user but not to the browser, so an attacker could start a connect flow for their
+  own project and get a victim to consent, storing the victim's GSC/GA4 access in the attacker's
+  project. `/start` now sets a random nonce as an HttpOnly, callback-path-scoped, SameSite=Lax
+  cookie (Secure outside dev) and `state` carries only its SHA-256; `/callback` refuses unless the
+  cookie matches, before redeeming Google's code, then clears it (also closes same-browser replay).
+  **Contract change:** the browser itself must call `/start` (`fetch(..., {credentials:
+  "include"})` or a navigation to the API origin) — a server-side call drops the cookie.
+
+**Crawler review (same day)** — with `tests/unit/test_crawl_fetcher.py` (Tier 1 had no direct tests):
+- *High — IP pinning was documented but not implemented.* `fetch()` validated the resolved IP, then
+  handed the *hostname* URL to httpx, which resolved DNS again — a rebinding answer between the two
+  lookups could land the request on `127.0.0.1` / `169.254.169.254`. Every request (and every
+  redirect hop) now goes to the validated IP, with `Host` = the real name and httpcore's
+  `sni_hostname` so SNI and certificate verification still use the real name; `Connection: close`
+  stops the IP-keyed pool reusing a TLS session verified for a different host. Verified live:
+  example.com / wikipedia.org / github.com (http->https redirect) fetch fine, and
+  wrong.host.badssl.com + self-signed.badssl.com are still rejected.
+- *Medium — the 10 MB body cap was ineffective.* `client.request()` buffers the whole body before
+  `aiter_bytes()` runs; now `client.send(..., stream=True)` so the cap cuts the download off.
+- Checked, not an issue: IPv6 forms embedding IPv4 (6to4, Teredo, NAT64) — the stdlib already
+  classes them private/reserved, so `_ip_is_blocked` refuses them wholesale (regression-tested).
+- *Residual (Tier 2):* Chromium does its own DNS, so the per-request `page.route` re-check can't pin
+  an IP the way Tier 1 now does — a rebinding window remains in the browser tier. Mitigation if
+  needed: launch Chromium with `--host-resolver-rules` mapping the validated host to its IP.
+
+**Backup/restore drill (same day):** Neon branch `restore-drill-2026-09-29` from `main` head,
+queryable in ~10 s; alembic head, 64 tables, 60 `FORCE`-RLS policies, row counts and the
+`NOBYPASSRLS` runtime roles all identical to `main`. Procedure in `RUNBOOK.md` §9.
+
+**Load test (same day):** `scripts/loadtest.py` / `make loadtest` — read-only (GET) concurrent load
+over the list endpoints, per-endpoint p50/p95/p99 + error rate, non-zero exit on thresholds so it
+can gate a deploy. Smoke run from a dev PC against Neon us-east-2 (5 workers, 15 s): 0 errors, but
+~1.3 s per DB-backed request vs 4 ms for `/health` — measured `SELECT 1` round trip is ~250 ms, and
+a request makes ~5 sequential round trips (pool ping, BEGIN, tenant GUCs, query, COMMIT). So the
+number is geography, not the app; production must run in the DB's region. `tenant_session` now
+sets both GUCs in one statement (one round trip fewer on every request and job): mean 1450 ->
+1282 ms, p95 2925 -> 1975 ms on the same smoke run.
+
 ---
 
 ## Honest status — what "complete" means here
 
-**Built and green (deterministic + offline-testable core of Phases 0–13):** monorepo + CI, DB
-spine with two-layer tenant isolation (RLS `FORCE`, proven + a coverage gate), evidence/provenance
-model, transactional outbox + relay + idempotent consumers + DLQ, logical model roles + router +
-redaction gate, tool registry + `tool_calls`, SSRF-guarded Tier-1 crawler + evidence store,
-33-check technical engine → `seo_issues`, 12-class intent + clustering + SERP intelligence +
-provider abstraction, content intelligence, PostgreSQL knowledge graph + traversal +
-recommendations, opportunity engine (idempotent, evidence-gated), **full safety spine** (structured
-planner + execution/verification/rollback against a real git repo + guardrails + approval API),
-analytics/anomaly/experiment-methodology/learning-loop, GEO citation parser + visibility + AI
-provider abstraction, event-driven autonomous pipeline, read API + Markdown reporting engine,
-consolidated eval scorecards. **11 migrations, ~140 tests.**
+**Built and green:** the deterministic + offline-testable core of Phases 0–13 (monorepo + CI, DB
+spine with RLS `FORCE` tenant isolation + a coverage gate, evidence/provenance, outbox + relay +
+DLQ, model roles + router + redaction, tool registry, SSRF-guarded Tier-1 **and Tier-2
+(Playwright)** crawler, technical/keyword/content/graph/opportunity engines, the full
+plan → approve → execute → verify → rollback safety spine, analytics + experiments + learning
+loop, GEO, the event-driven pipeline **now on a Celery beat timer**, read API with cursor
+pagination + `Idempotency-Key`, reporting, eval scorecards, the Temporal `SeoAgentWorkflow`
+tested against Temporal's test server), **13 migrations**. Also done and verified with real
+calls since this table was first written: LLM provider keys for all roles (Gemini / OpenRouter /
+Zhipu), Google OAuth + per-project encrypted token storage, SerpAPI, the Next.js dashboard, and
+the whole repo committed to git.
 
-**Since the table below was first written (2026-09-12), a second pass closed every *code* gap
-that didn't strictly need a live credential to write: LLM judge + revision loop, Core Web Vitals,
-the hosted GitHub-PR adapter, real GSC/GA4 API calls, GEO prompt library + AI-Overview citation
-tracking + machine-readability checks, the autonomous allow-list widened, and — the durable
-workflow itself — `worker.temporal.SeoAgentWorkflow`, tested against Temporal's real test server.
-What's left below is genuinely credential/infra-gated, not missing code.**
-
-**Not yet built — each needs an external dependency, not just more code:**
-| Area | Blocker |
+**Still open — each needs something outside the code:**
+| Area | Status / blocker |
 |---|---|
-| LLM judge / revision loop actually running (code done, see above) | provider API key (Gemini/OpenRouter free) |
-| Live SERP data, keyword volume/difficulty, competitor rankings | SerpAPI / DataForSEO key |
-| Core Web Vitals actually running (code done, see above) | PageSpeed + CrUX key |
-| Crawler Tier 2 (JS render) / Tier 3 (proxy) | Playwright container / proxy provider |
-| **Hosted** GitHub-PR execution adapter actually running (code done, see above) | a real repo token |
-| Live GSC/GA4 ingestion (API calls done, see above) | Google OAuth + a connected property + per-tenant encrypted token storage (not yet designed) |
-| GEO battery at scale (prompt library done, see above) | provider keys |
-| Durable workflow actually running (code done + test-server-tested, see above) | a real Temporal server (`make up-temporal`, needs Docker) or Temporal Cloud |
-| Next.js dashboard | frontend build wired to the read API — a new application, not a gap in this one |
-| OTel dashboards, security-review pass, load test, launch runbook | Phase 13 hardening + an OTel backend |
+| Core Web Vitals running live (code done) | `PAGESPEED_API_KEY` + `CRUX_API_KEY` (same GCP project as the OAuth client) — `TOMORROW.md` §1 |
+| Hosted GitHub-PR execution adapter running live (code done) | a fine-grained `GITHUB_TOKEN` (Contents + Pull requests: read/write) — `TOMORROW.md` §2 |
+| Durable Temporal workflow running in prod (passes against a real local dev server) | Temporal Cloud credentials; locally `make up-temporal` / `make temporal-dev` (Docker path not yet run) |
+| Crawler Tier 3 (proxy rotation for bot-protected sites) | not built; needs a proxy provider (`PROXY_URL`/credentials) |
+| OTel export + dashboards | exporter hookup + Grafana panels need an OTLP backend endpoint/key |
+| Load test at production scale | tool built + smoke-run (`make loadtest`); needs the API deployed next to the DB to give meaningful numbers — see 2026-09-29 entry |
+| Backup/restore: point-in-time restore + cut-over | head-of-branch restore drilled 2026-09-29 (`RUNBOOK.md` §9); PITR and cut-over not yet exercised |
+| Tier-2 (browser) DNS-rebinding window | Chromium resolves DNS itself; pin via `--host-resolver-rules` if it matters — see 2026-09-29 entry |
 
-The architecture, schema, deterministic engines, and the full safety/execution loop are in
-place and tested. Remaining work is integration gated on credentials/infra (`NEEDED-KEYS.md`).
+The architecture, schema, engines and the full safety/execution loop are in place and tested;
+what remains is live-credential/infra integration and the Phase 13 launch-readiness work above.

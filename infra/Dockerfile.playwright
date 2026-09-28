@@ -17,6 +17,9 @@ COPY apps ./apps
 COPY integrations ./integrations
 
 ENV PYTHONPATH=/app/packages:/app/apps/api:/app/apps/worker
+# Fail closed: a container started without ENV runs as prod (dev auth bypass off, real secrets
+# required — common/settings.py). docker-compose sets ENV=dev via .env for local use.
+ENV ENV=prod
 # Consumes ONLY the `render` queue (see infra/docker-compose.yml's `task_routes`) — the
 # lightweight `worker` service explicitly excludes it, so a Tier-2 job never lands on a container
 # without a browser, and Tier-1-only deployments never need this image at all.

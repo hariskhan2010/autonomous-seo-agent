@@ -6,8 +6,14 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_DEV_PLACEHOLDER = "dev-only-change-me"  # noqa: S105 - the public dev default, rejected outside dev
+_MIN_SECRET_LEN = 32
+_SIGNING_SECRET_FIELDS = (
+    "jwt_secret", "app_secret_key", "webhook_signing_secret", "encryption_key",
+)
 
 
 class Settings(BaseSettings):
@@ -72,6 +78,15 @@ class Settings(BaseSettings):
     slack_bot_token: str = ""  # noqa: S105
     slack_signing_secret: str = ""  # noqa: S105
 
+    # ── Phase 11 — Celery beat (worker/beat.py) ──
+    # Which projects the periodic `scheduler.tick` / `events.relay` fire for: comma-separated
+    # `tenant_uuid:project_uuid` pairs. Explicit on purpose — the runtime role is NOBYPASSRLS,
+    # so beat cannot (and must not) enumerate every tenant's projects itself. Empty = no
+    # periodic entries (beat runs but schedules nothing).
+    beat_targets: str = ""
+    beat_scheduler_tick_seconds: float = Field(default=60.0, gt=0)
+    beat_events_relay_seconds: float = Field(default=15.0, gt=0)
+
     # ── Phase 2 ──
     s3_endpoint: str = "http://localhost:9000"
     s3_access_key: str = "minioadmin"
@@ -97,6 +112,25 @@ class Settings(BaseSettings):
         ),
         exclude=True,
     )
+
+    @model_validator(mode="after")
+    def _no_placeholder_secrets_outside_dev(self) -> Settings:
+        # The signing/encryption defaults above are public (they're in this file). Outside dev/test
+        # they'd let anyone mint a valid JWT for any tenant, or decrypt stored OAuth tokens — so
+        # refuse to start rather than run with them.
+        if self.env in ("dev", "test"):
+            return self
+        weak = [
+            name
+            for name in _SIGNING_SECRET_FIELDS
+            if getattr(self, name) == _DEV_PLACEHOLDER or len(getattr(self, name)) < _MIN_SECRET_LEN
+        ]
+        if weak:
+            raise ValueError(
+                f"ENV={self.env} requires real values (>= {_MIN_SECRET_LEN} chars, not the dev "
+                f"placeholder) for: {', '.join(n.upper() for n in weak)}"
+            )
+        return self
 
     @staticmethod
     def _db_password(url: str) -> str:

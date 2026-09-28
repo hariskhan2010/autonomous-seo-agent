@@ -7,12 +7,24 @@ import datetime as dt
 import uuid
 
 import structlog
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import idempotency
 from app.auth import Principal
 from app.deps import get_db, require_role
+from app.idempotency import IdempotencyKeyHeader
+from app.pagination import MAX_LIMIT, paginate
 from common.settings import settings
 from db.models.evidence import Evidence, EvidenceLink
 from db.models.opportunity import Opportunity
@@ -21,6 +33,10 @@ from db.models.safety import Approval, Change, Plan, PlanStep, Verification
 router = APIRouter(tags=["approval-console"])
 log = structlog.get_logger("api.approval")
 UTC = dt.UTC
+
+_CURSOR = Query(default=None, description="Opaque cursor from a previous `X-Next-Cursor` header.")
+_LIMIT = Query(default=None, ge=1, le=MAX_LIMIT,
+               description="Page size. Omit (with no cursor) for the full, unpaginated listing.")
 
 
 async def _signal_temporal_after_commit(
@@ -49,18 +65,23 @@ async def _signal_temporal_after_commit(
 
 @router.get("/opportunities")
 def list_opportunities(
+    request: Request, response: Response,
     project_id: uuid.UUID | None = Query(default=None),
     priority: str | None = Query(default=None),
     status_: str | None = Query(default=None, alias="status"),
+    limit: int | None = _LIMIT, cursor: str | None = _CURSOR,
     db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
-    q = select(Opportunity).order_by(Opportunity.score.desc())
+    """Highest score first. `?limit=&cursor=` pages it (next cursor in `X-Next-Cursor`)."""
+    q = select(Opportunity)
     if project_id is not None:
         q = q.where(Opportunity.project_id == project_id)
     if priority:
         q = q.where(Opportunity.priority == priority)
     if status_:
         q = q.where(Opportunity.status == status_)
+    rows = paginate(db, request, response, q, (Opportunity.score, Opportunity.id),
+                    scope="opportunities", cursor=cursor, limit=limit)
     return [
         {
             "id": str(o.id), "type": o.type, "title": o.title, "url": o.url,
@@ -68,7 +89,7 @@ def list_opportunities(
             "action_class": o.action_class, "recommendation": o.recommendation,
             "expected_outcome": o.expected_outcome, "seen_count": o.seen_count,
         }
-        for o in db.execute(q).scalars()
+        for o in rows
     ]
 
 
@@ -136,8 +157,26 @@ def approve_plan(
     plan_id: uuid.UUID,
     body: dict[str, object],
     background_tasks: BackgroundTasks,
+    response: Response,
+    idempotency_key: IdempotencyKeyHeader = None,
     principal: Principal = Depends(require_role("operator")),
     db: Session = Depends(get_db),
+) -> dict[str, object]:
+    """Honors `Idempotency-Key`: a retried approval with the same key + body replays the first
+    response (and does NOT re-signal Temporal or write a second `Approval` row)."""
+    idem = idempotency.begin(db, response, tenant_id=principal.tenant_id, scope="plans.approve",
+                             key=idempotency_key,
+                             request={"plan_id": str(plan_id), "body": body})
+    if idem.replayed:
+        return dict(idem.body)
+    result = _approve(plan_id, body, background_tasks, principal, db)
+    idem.store(status.HTTP_201_CREATED, result)
+    return result
+
+
+def _approve(
+    plan_id: uuid.UUID, body: dict[str, object], background_tasks: BackgroundTasks,
+    principal: Principal, db: Session,
 ) -> dict[str, object]:
     plan = db.get(Plan, plan_id)
     if plan is None:
@@ -163,12 +202,15 @@ def approve_plan(
 
 @router.get("/changes")
 def list_changes(
-    project_id: uuid.UUID | None = Query(default=None), db: Session = Depends(get_db),
+    request: Request, response: Response,
+    project_id: uuid.UUID | None = Query(default=None),
+    limit: int | None = _LIMIT, cursor: str | None = _CURSOR, db: Session = Depends(get_db),
 ) -> list[dict[str, object]]:
-    q = select(Change).order_by(Change.created_at.desc())
+    q = select(Change)
     if project_id is not None:
         q = q.where(Change.project_id == project_id)
-    rows = db.execute(q).scalars()
+    rows = paginate(db, request, response, q, (Change.created_at, Change.id),
+                    scope="changes", cursor=cursor, limit=limit)
     out: list[dict[str, object]] = []
     for c in rows:
         ver = db.execute(

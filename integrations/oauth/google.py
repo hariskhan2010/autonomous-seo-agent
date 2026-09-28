@@ -9,11 +9,18 @@ codebase's httpx-first style elsewhere (`integrations/analytics/{gsc,ga4}.py`).
 `build_oauth_state` / `verify_oauth_state` are the CSRF defense for the callback endpoint: Google
 redirects the user's browser there directly, with no bearer token to authenticate the request, so
 the signed `state` round-tripped through Google is the only thing proving which tenant/project/user
-actually started this flow."""
+actually started this flow. The signature alone doesn't prove it's the *same browser*, though — an
+attacker could start a flow for their own project and hand a victim the consent link (login CSRF,
+storing the victim's Google access in the attacker's project). So `state` also carries the SHA-256
+of a random nonce that `/start` sets as an HttpOnly cookie in the initiating browser; the callback
+requires that cookie to match."""
 
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import hmac
+import secrets
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -37,7 +44,7 @@ SCOPES = (
 )
 
 _STATE_PURPOSE = "google_oauth"
-_STATE_TTL_SECONDS = 600  # the whole consent round trip must complete within 10 minutes
+STATE_TTL_SECONDS = 600  # the whole consent round trip must complete within 10 minutes
 UTC = dt.UTC
 
 
@@ -56,23 +63,42 @@ class OAuthState:
     user_id: uuid.UUID
 
 
-def build_oauth_state(*, tenant_id: uuid.UUID, project_id: uuid.UUID, user_id: uuid.UUID) -> str:
+def new_state_nonce() -> str:
+    """The browser-binding secret: goes in the HttpOnly cookie, only its hash goes in `state`."""
+    return secrets.token_urlsafe(32)
+
+
+def _nonce_hash(nonce: str) -> str:
+    return hashlib.sha256(nonce.encode("utf-8")).hexdigest()
+
+
+def build_oauth_state(
+    *, tenant_id: uuid.UUID, project_id: uuid.UUID, user_id: uuid.UUID, nonce: str,
+) -> str:
     now = dt.datetime.now(UTC)
     claims = {
         "purpose": _STATE_PURPOSE, "tenant_id": str(tenant_id), "project_id": str(project_id),
-        "user_id": str(user_id), "iat": now,
-        "exp": now + dt.timedelta(seconds=_STATE_TTL_SECONDS),
+        "user_id": str(user_id), "nonce_hash": _nonce_hash(nonce), "iat": now,
+        "exp": now + dt.timedelta(seconds=STATE_TTL_SECONDS),
     }
     return jwt.encode(claims, settings.jwt_secret, algorithm="HS256")
 
 
-def verify_oauth_state(state: str) -> OAuthState:
+def verify_oauth_state(state: str, *, nonce: str | None) -> OAuthState:
     try:
         claims = jwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
     except jwt.PyJWTError as exc:
         raise InvalidOAuthState(f"invalid or expired oauth state: {exc}") from exc
     if claims.get("purpose") != _STATE_PURPOSE:
         raise InvalidOAuthState("oauth state was not issued for this flow")
+    expected = claims.get("nonce_hash")
+    if not nonce or not isinstance(expected, str) or not hmac.compare_digest(
+        _nonce_hash(nonce), expected
+    ):
+        raise InvalidOAuthState(
+            "oauth state is not bound to this browser — finish the connect flow in the same "
+            "browser that started it"
+        )
     try:
         return OAuthState(
             tenant_id=uuid.UUID(claims["tenant_id"]), project_id=uuid.UUID(claims["project_id"]),

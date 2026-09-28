@@ -35,3 +35,6 @@ pgdata/
 Thumbs.db
 .idea/
 .vscode/
+
+# Temporal dev server (make temporal-dev)
+.temporal-dev.db*

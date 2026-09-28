@@ -40,7 +40,7 @@ jobs:
       - name: Secret scan
         run: |
           uv run detect-secrets scan --baseline .secrets.baseline
-          git diff --exit-code .secrets.baseline
+          git diff --exit-code -I '"generated_at"' .secrets.baseline  # the scan rewrites its timestamp every run
       - name: Dependency vulnerability scan
         run: uvx pip-audit --local  # blocking as of the Phase 13 hardening pass (was advisory-only)
       - name: Migrations up + down + up + models-in-sync

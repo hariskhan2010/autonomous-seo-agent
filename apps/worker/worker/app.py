@@ -7,6 +7,7 @@ from celery import Celery
 
 from common.logging import configure_logging
 from common.settings import settings
+from worker.beat import build_beat_schedule, parse_beat_targets
 
 configure_logging()
 
@@ -25,6 +26,13 @@ celery_app.conf.update(
     # queue, consumed ONLY by the Tier-2 container (`infra/Dockerfile.playwright`). The default
     # `worker` service never launches a browser and should never consume this queue.
     task_routes={"crawl.run_tier2": {"queue": "render"}},
+    # Phase 11: periodic `scheduler.tick` + `events.relay` per configured project — run by the
+    # `beat` compose service / `make beat`. See worker/beat.py for why targets are explicit.
+    beat_schedule=build_beat_schedule(
+        parse_beat_targets(settings.beat_targets),
+        scheduler_tick_seconds=settings.beat_scheduler_tick_seconds,
+        events_relay_seconds=settings.beat_events_relay_seconds,
+    ),
 )
 
 
