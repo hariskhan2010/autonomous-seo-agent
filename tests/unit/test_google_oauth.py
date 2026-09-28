@@ -17,6 +17,7 @@ from integrations.oauth.google import (
     build_oauth_state,
     exchange_code_for_tokens,
     fetch_account_email,
+    new_state_nonce,
     refresh_access_token,
     revoke_token,
     verify_oauth_state,
@@ -45,17 +46,36 @@ class _FakeResponse:
 # ── OAuth state (CSRF defense) ──
 
 
+def _ids() -> dict[str, uuid.UUID]:
+    return {"tenant_id": uuid.uuid4(), "project_id": uuid.uuid4(), "user_id": uuid.uuid4()}
+
+
 def test_state_round_trips() -> None:
     t, p, u = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    state = build_oauth_state(tenant_id=t, project_id=p, user_id=u)
-    parsed = verify_oauth_state(state)
+    nonce = new_state_nonce()
+    state = build_oauth_state(tenant_id=t, project_id=p, user_id=u, nonce=nonce)
+    parsed = verify_oauth_state(state, nonce=nonce)
     assert (parsed.tenant_id, parsed.project_id, parsed.user_id) == (t, p, u)
 
 
+def test_state_carries_only_a_hash_of_the_nonce() -> None:
+    nonce = new_state_nonce()
+    state = build_oauth_state(**_ids(), nonce=nonce)
+    assert nonce not in str(jwt.decode(state, options={"verify_signature": False}))
+
+
+@pytest.mark.parametrize("presented", [None, "", "some-other-browsers-nonce"])
+def test_state_without_the_matching_browser_nonce_is_rejected(presented: str | None) -> None:
+    state = build_oauth_state(**_ids(), nonce=new_state_nonce())
+    with pytest.raises(InvalidOAuthState, match="same browser"):
+        verify_oauth_state(state, nonce=presented)
+
+
 def test_tampered_state_is_rejected() -> None:
-    state = build_oauth_state(tenant_id=uuid.uuid4(), project_id=uuid.uuid4(), user_id=uuid.uuid4())
+    nonce = new_state_nonce()
+    state = build_oauth_state(**_ids(), nonce=nonce)
     with pytest.raises(InvalidOAuthState):
-        verify_oauth_state(state + "x")
+        verify_oauth_state(state + "x", nonce=nonce)
 
 
 def test_expired_state_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -66,7 +86,7 @@ def test_expired_state_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
         settings.jwt_secret, algorithm="HS256",
     )
     with pytest.raises(InvalidOAuthState):
-        verify_oauth_state(state)
+        verify_oauth_state(state, nonce="n")
 
 
 def test_state_from_a_different_purpose_is_rejected() -> None:
@@ -76,7 +96,7 @@ def test_state_from_a_different_purpose_is_rejected() -> None:
         settings.jwt_secret, algorithm="HS256",
     )
     with pytest.raises(InvalidOAuthState, match="not issued for this flow"):
-        verify_oauth_state(state)
+        verify_oauth_state(state, nonce="n")
 
 
 def test_authorization_url_requests_offline_access_and_carries_state() -> None:

@@ -471,13 +471,16 @@ the Docker image path itself is not yet run.
   JWTs carrying a `purpose` claim (the OAuth `state`, same signing key) are refused as API tokens;
   malformed `X-Dev-*` headers are a 400, not a 500.
 
-**Found, not fixed:**
-- *Medium — OAuth login-CSRF.* The Google OAuth `state` is signed and bound to
-  tenant/project/user but not to the browser session, so an attacker can start a connect flow for
-  their own project and get a victim to consent, storing the victim's GSC/GA4 access in the
-  attacker's project. Fix: set an HttpOnly nonce cookie at `/start` and require it to match the
-  `state` at `/callback` (needs the dashboard to hit `/start` from the browser, not server-side).
-- *Low — `state` replay* within its 10-minute TTL (single-use nonce would close it).
+- *Medium — OAuth login-CSRF (fixed same day).* The Google OAuth `state` was signed and bound to
+  tenant/project/user but not to the browser, so an attacker could start a connect flow for their
+  own project and get a victim to consent, storing the victim's GSC/GA4 access in the attacker's
+  project. `/start` now sets a random nonce as an HttpOnly, callback-path-scoped, SameSite=Lax
+  cookie (Secure outside dev) and `state` carries only its SHA-256; `/callback` refuses unless the
+  cookie matches, before redeeming Google's code, then clears it (also closes same-browser replay).
+  **Contract change:** the browser itself must call `/start` (`fetch(..., {credentials:
+  "include"})` or a navigation to the API origin) — a server-side call drops the cookie.
+
+**Not covered:**
 - Crawler (SSRF guard, Tier-2 per-request re-check) was not re-reviewed in this pass — it relies
   on its existing test suites (`test_ssrf*`, `test_render_guard.py`). Still worth a dedicated look.
 
@@ -507,7 +510,7 @@ the whole repo committed to git.
 | OTel export + dashboards | exporter hookup + Grafana panels need an OTLP backend endpoint/key |
 | Load test | not run |
 | Backup / restore drill | not run (Neon branch restore is the likely mechanism) |
-| OAuth login-CSRF (security review finding) | bind the OAuth `state` to a browser cookie — see 2026-09-29 entry |
+| Crawler SSRF / Tier-2 guard re-review | not re-reviewed in the 2026-09-29 security pass |
 
 The architecture, schema, engines and the full safety/execution loop are in place and tested;
 what remains is live-credential/infra integration and the Phase 13 launch-readiness work above.

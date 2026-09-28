@@ -5,15 +5,19 @@ per-project refresh token has to come from somewhere.
 `/oauth/google/callback` is the one route in this file with no bearer token — Google redirects the
 user's browser here directly, so the signed `state` round-tripped through the whole consent flow
 (`integrations/oauth/google.py`) is the only thing authenticating the request; it is verified
-before anything else happens."""
+before anything else happens, together with the `/start`-issued nonce cookie that binds it to the
+initiating browser. That means the BROWSER must call `/start` (a `fetch(..., {credentials:
+"include"})` or navigation to the API origin) — a server-side call would drop the cookie and the
+callback would then refuse the flow."""
 
 from __future__ import annotations
 
 import datetime as dt
 import uuid
+from urllib.parse import urlparse
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from integrations.oauth import google as google_oauth
 from sqlalchemy.orm import Session
 
@@ -21,12 +25,19 @@ from app.auth import Principal
 from app.deps import get_db, require_project, require_role
 from app.schemas import OAuthConfigUpdate, OAuthStartOut, OAuthStatusOut
 from common.crypto import decrypt_secret, encrypt_secret
+from common.settings import settings
 from db.models.credential import OAuthCredential
 from db.session import tenant_session
 
 router = APIRouter(tags=["oauth"])
 log = structlog.get_logger("api.oauth")
 UTC = dt.UTC
+NONCE_COOKIE = "seo_oauth_nonce"
+
+
+def _nonce_cookie_path() -> str:
+    # Scoped to the callback route only — the nonce is never sent anywhere else.
+    return urlparse(settings.google_oauth_redirect_uri).path or "/"
 
 
 def _active_credential(db: Session, project_id: uuid.UUID) -> OAuthCredential | None:
@@ -38,17 +49,26 @@ def _active_credential(db: Session, project_id: uuid.UUID) -> OAuthCredential | 
 
 @router.get("/projects/{project_id}/oauth/google/start", response_model=OAuthStartOut)
 def start_google_oauth(
+    response: Response,
     project_id: uuid.UUID = Depends(require_project),
     principal: Principal = Depends(require_role("operator")),
 ) -> OAuthStartOut:
+    nonce = google_oauth.new_state_nonce()
     state = google_oauth.build_oauth_state(
         tenant_id=principal.tenant_id, project_id=project_id, user_id=principal.user_id,
+        nonce=nonce,
+    )
+    response.set_cookie(
+        NONCE_COOKIE, nonce, max_age=google_oauth.STATE_TTL_SECONDS, path=_nonce_cookie_path(),
+        httponly=True, samesite="lax",  # Lax still rides along on Google's top-level redirect back
+        secure=settings.env not in ("dev", "test"),  # dev runs on plain http://localhost
     )
     return OAuthStartOut(authorization_url=google_oauth.build_authorization_url(state=state))
 
 
 @router.get("/oauth/google/callback")
 def google_oauth_callback(
+    request: Request, response: Response,
     code: str | None = Query(default=None), state: str | None = Query(default=None),
     error: str | None = Query(default=None),
 ) -> dict[str, object]:
@@ -58,9 +78,14 @@ def google_oauth_callback(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "missing code or state")
 
     try:
-        parsed_state = google_oauth.verify_oauth_state(state)
+        parsed_state = google_oauth.verify_oauth_state(
+            state, nonce=request.cookies.get(NONCE_COOKIE)
+        )
     except google_oauth.InvalidOAuthState as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    # Single use: cleared on success. (If a later step raises, FastAPI drops this header, and the
+    # cookie simply expires with the state; Google's `code` is single-use regardless.)
+    response.delete_cookie(NONCE_COOKIE, path=_nonce_cookie_path())
 
     try:
         tokens = google_oauth.exchange_code_for_tokens(code)
