@@ -15,5 +15,8 @@ COPY database ./database
 COPY config ./config
 
 ENV PYTHONPATH=/app/packages:/app/apps/api:/app/apps/worker
+# Fail closed: a container started without ENV runs as prod (dev auth bypass off, real secrets
+# required — common/settings.py). docker-compose sets ENV=dev via .env for local use.
+ENV ENV=prod
 EXPOSE 8000
 CMD ["uv", "run", "uvicorn", "app.main:app", "--app-dir", "apps/api", "--host", "0.0.0.0", "--port", "8000"]

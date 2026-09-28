@@ -447,6 +447,40 @@ Code-only pass — nothing here needs a live credential.
   table rewritten (it still listed LLM keys, Google OAuth, Tier 2, the dashboard, SerpAPI and the
   git commit as open — all done, see `CLAUDE.md` / `TOMORROW.md`).
 
+## Local Temporal + security review — ✅ DONE (2026-09-29, branch `cloud/improvements`)
+
+**Local Temporal:** `temporalio/auto-setup:1.24.2` (deprecated upstream, crashed with exit 2) is
+replaced by the Temporal CLI dev server (`server start-dev`, SQLite, UI on :8080); `temporal-ui`
+dropped. `make up-temporal` (Docker) or `make temporal-dev` (no Docker, needs the CLI). The
+`SeoAgentWorkflow` suite passes against a real dev server (`WorkflowEnvironment.start_local()`);
+the Docker image path itself is not yet run.
+
+**Security review (auth + write path)** — fixed, with `tests/unit/test_security_hardening.py`:
+- *Critical — fail-open config.* `env` defaulted to `dev` (enabling the `X-Dev-*` header bypass)
+  and `JWT_SECRET`/`APP_SECRET_KEY`/`WEBHOOK_SIGNING_SECRET`/`ENCRYPTION_KEY` defaulted to a public
+  placeholder, unchecked: a prod deploy missing any of them let anyone mint a JWT for any tenant, or
+  decrypt stored OAuth refresh tokens. Now `Settings` refuses to start outside dev/test unless all
+  four are real (>= 32 chars), and `Dockerfile.api`/`Dockerfile.playwright` default to `ENV=prod`
+  (compose still sets `ENV=dev` via `.env`).
+- *High — path traversal in execution adapters.* `LocalGitAdapter` joined `ChangeSpec.path`
+  unchecked (`../`, absolute paths, `.git/hooks/*` -> code execution via `post-commit`);
+  `GitHubPRAdapter` built API URLs from it. `safe_repo_path()` now rejects `..`, absolute/drive
+  paths, `.git/`, `.github/workflows/`; the local adapter also re-checks the resolved path stays in
+  the repo, before any git call.
+- *Medium — bearer tokens.* `exp` + `sub` now required (a token without `exp` never expired);
+  JWTs carrying a `purpose` claim (the OAuth `state`, same signing key) are refused as API tokens;
+  malformed `X-Dev-*` headers are a 400, not a 500.
+
+**Found, not fixed:**
+- *Medium — OAuth login-CSRF.* The Google OAuth `state` is signed and bound to
+  tenant/project/user but not to the browser session, so an attacker can start a connect flow for
+  their own project and get a victim to consent, storing the victim's GSC/GA4 access in the
+  attacker's project. Fix: set an HttpOnly nonce cookie at `/start` and require it to match the
+  `state` at `/callback` (needs the dashboard to hit `/start` from the browser, not server-side).
+- *Low — `state` replay* within its 10-minute TTL (single-use nonce would close it).
+- Crawler (SSRF guard, Tier-2 per-request re-check) was not re-reviewed in this pass — it relies
+  on its existing test suites (`test_ssrf*`, `test_render_guard.py`). Still worth a dedicated look.
+
 ---
 
 ## Honest status — what "complete" means here
@@ -468,12 +502,12 @@ the whole repo committed to git.
 |---|---|
 | Core Web Vitals running live (code done) | `PAGESPEED_API_KEY` + `CRUX_API_KEY` (same GCP project as the OAuth client) — `TOMORROW.md` §1 |
 | Hosted GitHub-PR execution adapter running live (code done) | a fine-grained `GITHUB_TOKEN` (Contents + Pull requests: read/write) — `TOMORROW.md` §2 |
-| Durable Temporal workflow running live (code done + test-server-tested) | a real Temporal server. Local `temporalio/auto-setup:1.24.2` crashes on startup (exit 2) even though `db`/`redis`/`minio` come up — not yet root-caused (`TOMORROW.md` "Known issue"); options: plain `postgres:16` for Temporal's DBs, or Temporal Cloud |
+| Durable Temporal workflow running in prod (passes against a real local dev server) | Temporal Cloud credentials; locally `make up-temporal` / `make temporal-dev` (Docker path not yet run) |
 | Crawler Tier 3 (proxy rotation for bot-protected sites) | not built; needs a proxy provider (`PROXY_URL`/credentials) |
 | OTel export + dashboards | exporter hookup + Grafana panels need an OTLP backend endpoint/key |
 | Load test | not run |
 | Backup / restore drill | not run (Neon branch restore is the likely mechanism) |
-| Dedicated security review (write path + crawler + auth) | not done — only the targeted Phase 13 hardening fixes so far |
+| OAuth login-CSRF (security review finding) | bind the OAuth `state` to a browser cookie — see 2026-09-29 entry |
 
 The architecture, schema, engines and the full safety/execution loop are in place and tested;
 what remains is live-credential/infra integration and the Phase 13 launch-readiness work above.

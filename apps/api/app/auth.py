@@ -39,11 +39,21 @@ def _decode(token: str) -> dict[str, object]:
         if not secret:
             continue
         try:
-            return jwt.decode(
-                token, secret, algorithms=["HS256"], options={"verify_aud": False}
+            claims: dict[str, object] = jwt.decode(
+                token,
+                secret,
+                algorithms=["HS256"],
+                # exp is required: a token minted without one would otherwise never expire.
+                options={"verify_aud": False, "require": ["exp", "sub"]},
             )
         except jwt.PyJWTError as exc:  # noqa: PERF203
             errors.append(str(exc))
+            continue
+        # Other JWTs signed with JWT_SECRET (the Google OAuth `state`, integrations/oauth/google.py)
+        # carry a `purpose` claim — they are not API credentials, whatever else they contain.
+        if "purpose" in claims:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "invalid token: not an API token")
+        return claims
     detail = "; ".join(errors) or "no verification key configured"
     raise HTTPException(status.HTTP_401_UNAUTHORIZED, f"invalid token: {detail}")
 
@@ -55,9 +65,15 @@ def principal_from_request(request: Request) -> Principal:
         dev_user = request.headers.get("x-dev-user")
         dev_tenant = request.headers.get("x-dev-tenant")
         if dev_user and dev_tenant:
+            try:
+                user_id, tenant_id = uuid.UUID(dev_user), uuid.UUID(dev_tenant)
+            except ValueError as exc:  # a 400, not an unhandled 500
+                raise HTTPException(
+                    status.HTTP_400_BAD_REQUEST, "X-Dev-User / X-Dev-Tenant must be UUIDs"
+                ) from exc
             return Principal(
-                user_id=uuid.UUID(dev_user),
-                tenant_id=uuid.UUID(dev_tenant),
+                user_id=user_id,
+                tenant_id=tenant_id,
                 email="dev@localhost",
                 roles=frozenset({request.headers.get("x-dev-role", "owner")}),
             )

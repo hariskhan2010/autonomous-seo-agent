@@ -56,6 +56,30 @@ class ChangeAdapter(Protocol):
     def rollback(self, spec: ChangeSpec, *, backup_ref: str | None) -> bool: ...
 
 
+class UnsafeChangePath(ValueError):
+    pass
+
+
+def safe_repo_path(path: str) -> str:
+    """Validates a change's target path as repo-relative. `ChangeSpec.path` can originate from
+    crawled or model-derived data, so it's untrusted: no absolute/drive paths, no `..` escape, and
+    nothing under `.git/` (writing `.git/hooks/*` would be code execution on the next git call) or
+    `.github/workflows/` (a pushed branch's workflow runs with the repo's secrets).
+    Returns the normalised POSIX form."""
+    norm = path.replace("\\", "/").lstrip("/")
+    parts = [p for p in norm.split("/") if p not in ("", ".")]
+    if (
+        not parts
+        or ":" in parts[0]                     # C:/..., or a URL-ish scheme
+        or any(p == ".." for p in parts)
+        or any(p.lower() == ".git" for p in parts)
+        or any("\x00" in p for p in parts)
+        or [p.lower() for p in parts[:2]] == [".github", "workflows"]  # CI runs with repo secrets
+    ):
+        raise UnsafeChangePath(f"refusing unsafe change path: {path!r}")
+    return "/".join(parts)
+
+
 def _git(repo: Path, *args: str) -> str:
     out = subprocess.run(  # noqa: S603
         ["git", "-C", str(repo), *args], capture_output=True, text=True, check=True
@@ -71,7 +95,11 @@ class LocalGitAdapter:
         self.repo = Path(repo_path)
 
     def _abs(self, rel: str) -> Path:
-        return self.repo / rel.lstrip("/")
+        target = (self.repo / safe_repo_path(rel)).resolve()
+        # Belt and braces for symlinks inside the repo that point out of it.
+        if not target.is_relative_to(self.repo.resolve()):
+            raise UnsafeChangePath(f"refusing change path outside the repo: {rel!r}")
+        return target
 
     def read_state(self, spec: ChangeSpec) -> str | None:
         p = self._abs(spec.path)
@@ -91,8 +119,8 @@ class LocalGitAdapter:
                              would_change=would)
 
     def apply(self, spec: ChangeSpec) -> ApplyResult:
+        p = self._abs(spec.path)  # validate before touching git or the filesystem
         before_sha = _git(self.repo, "rev-parse", "HEAD")
-        p = self._abs(spec.path)
         if spec.op == "delete_file":
             if p.exists():
                 p.unlink()
@@ -150,9 +178,13 @@ class GitHubPRAdapter:
     def _repo_path(self, *parts: str) -> str:
         return "/".join(("/repos", self.owner, self.repo, *parts))
 
+    def _contents_path(self, path: str) -> str:
+        # An unchecked `../` here would address a different GitHub API endpoint entirely.
+        return self._repo_path("contents", safe_repo_path(path))
+
     def _get_file(self, path: str, ref: str) -> tuple[str | None, str | None]:
         """Returns (content, blob_sha), or (None, None) if the file doesn't exist at `ref`."""
-        resp = self._client.get(self._repo_path("contents", path), params={"ref": ref})
+        resp = self._client.get(self._contents_path(path), params={"ref": ref})
         if resp.status_code == 404:
             return None, None
         resp.raise_for_status()
@@ -198,7 +230,7 @@ class GitHubPRAdapter:
         if spec.op == "delete_file":
             if sha:
                 self._client.request(
-                    "DELETE", self._repo_path("contents", spec.path),
+                    "DELETE", self._contents_path(spec.path),
                     json={"message": spec.message, "sha": sha, "branch": branch},
                 ).raise_for_status()
         else:
@@ -209,7 +241,7 @@ class GitHubPRAdapter:
             }
             if sha:
                 body["sha"] = sha
-            self._client.put(self._repo_path("contents", spec.path), json=body).raise_for_status()
+            self._client.put(self._contents_path(spec.path), json=body).raise_for_status()
 
         pr = self._client.post(
             self._repo_path("pulls"),
