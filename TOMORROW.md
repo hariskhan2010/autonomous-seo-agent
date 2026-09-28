@@ -1,8 +1,12 @@
 # Remaining keys — pick up here
 
-Everything else from this build session is done and verified (dashboard, real LLM roles, backend
+Everything else from the build session is done and verified (dashboard, real LLM roles, backend
 fixes — see `CLAUDE.md`). These are the only things left, and only you can get them. Full
-reference for the whole project's keys is `NEEDED-KEYS.md`; this file is just today's short list.
+reference for the whole project's keys is `NEEDED-KEYS.md`; this file is just the short list.
+
+**Update (2026-09-18):** SerpAPI is done — `SERPAPI_API_KEY` is set in `.env` and verified with a
+real search call (`status: Success`). Two keys left below. Disk space and the git commit (both
+previously listed as open items) are also resolved — see the bottom of this file.
 
 ---
 
@@ -20,18 +24,7 @@ You already created a project in Google Cloud Console for the OAuth client. Reus
    CRUX_API_KEY=...
    ```
 
-## 2. SerpAPI (real search-results data — free to start)
-
-1. **serpapi.com** → **Sign up** (free tier: 100 searches/month, no credit card needed)
-2. Your API key is shown on the account dashboard right after signup
-3. Paste it into `.env`:
-   ```
-   SERPAPI_API_KEY=...
-   ```
-   *(Alternative: DataForSEO — dataforseo.com, pay-as-you-go from ~$25, needs a card. SerpAPI's
-   free tier is the easier no-card starting point.)*
-
-## 3. GitHub token (so the agent can open real PRs)
+## 2. GitHub token (so the agent can open real PRs)
 
 1. **github.com** → your avatar → **Settings → Developer settings → Personal access tokens →
    Fine-grained tokens → Generate new token**
@@ -48,11 +41,21 @@ You already created a project in Google Cloud Console for the OAuth client. Reus
 ## After you've added these
 
 Just tell me — I'll verify each one with a real API call (not just check the field isn't empty),
-same as I did for the Gemini/OpenRouter/Zhipu/Google OAuth keys already in `.env`.
+same as I did for the Gemini/OpenRouter/Zhipu/Google OAuth/SerpAPI keys already in `.env`.
 
-## Two other open items (not credentials)
+## Resolved (no longer open)
 
-- **Disk space on C:** still at 0 bytes free from earlier — blocks running Temporal locally.
-  Windows Settings → System → Storage is the reliable way to find what's using it.
-- **Git commit**: 254+ files in this project have never been committed. Say the word whenever
-  you want that done — it's a deliberate hold, not something blocked on you technically.
+- ~~SerpAPI key~~ — set and verified 2026-09-17.
+- ~~Disk space on C:~~ — was 0 bytes free, now 7.8G free; no longer blocks Docker/Temporal locally.
+- ~~Git commit~~ — the 254+ never-committed files are now in git (`bf1b30d`, initial commit,
+  307 files). `.env` and other secrets confirmed gitignored before committing.
+
+## Known issue (separate from credentials)
+
+Local Temporal (`docker compose -f infra/docker-compose.yml up -d db redis minio temporal
+temporal-ui`) still doesn't come up: `db`/`redis`/`minio` start fine, but the
+`temporalio/auto-setup:1.24.2` container crashes on startup (exit code 2, corrupted/unreadable
+output instead of a normal error) — reproduced across container recreation and a fresh image pull,
+so it's not a caching fluke. Postgres itself logs nothing wrong. Not yet root-caused — options to
+try next: swap the local Postgres image (`pgvector/pgvector:pg16` → plain `postgres:16`) for the
+temporal databases, or use Temporal Cloud instead of running it locally.
