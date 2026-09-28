@@ -316,7 +316,8 @@ One entry per phase as it lands. Milestone/DoD tables in `../A-TO-Z-PLAN.md` §S
 - **Integration test on Neon**: seed a crawl → `run_once` → `seo_issues` + `opportunities` +
   `plans` awaiting approval all produced unattended; `agent_run.state == awaiting_approval`.
   Scheduler test: due schedule fires + reschedules a week out.
-- **Deferred:** Celery beat wiring for the scheduler tick.
+- **Deferred:** Celery beat wiring for the scheduler tick. → **cleared 2026-09-28** (see
+  "Beat wiring + API pagination/idempotency" below).
 
 ### Phase 11 deferral cleared — the Temporal durable workflow (2026-09-12)
 `apps/worker/worker/temporal/`: `SeoAgentWorkflow` (ADR-0003) — the always-on OBSERVE→PLAN→
@@ -387,7 +388,8 @@ boundary (never autonomous, enforced independently in both `execution.approval.r
 - **Reporting engine** (`packages/reporting/`): deterministic Markdown executive + technical
   reports (performance deltas, priority opportunities, recent changes, AI-visibility, issues by
   severity). 2 unit tests. PDF/email = a wrapper added with the mail provider.
-- **Deferred:** cursor pagination + `Idempotency-Key` on the new endpoints (helper exists),
+- **Deferred:** ~~cursor pagination + `Idempotency-Key` on the new endpoints~~ (cleared
+  2026-09-28, see below),
   per-tenant API keys + quotas, competitors/backlinks endpoints, the Next.js dashboard (evolve
   a fresh Next.js dashboard wired to this API), Slack/email digests.
 
@@ -403,42 +405,75 @@ boundary (never autonomous, enforced independently in both `execution.approval.r
   panels, a dedicated `security-review` pass on the write path + crawler + auth, load test,
   backup/restore drill, `DEPLOYMENT.md` launch runbook.
 
+## Beat wiring + API pagination/idempotency — ✅ DONE (2026-09-28, branch `cloud/improvements`)
+
+Code-only pass — nothing here needs a live credential.
+
+- **Celery beat (Phase 11 deferral).** `worker/beat.py` builds `celery_app.conf.beat_schedule`:
+  one `scheduler.tick` + one `events.relay` entry per configured target. Targets are explicit
+  config (`BEAT_TARGETS=tenant_uuid:project_uuid,...`), not discovered — the runtime role is
+  NOBYPASSRLS and both tasks run inside `tenant_session`, so beat cannot (and must not) list every
+  tenant's projects itself. Intervals: `BEAT_SCHEDULER_TICK_SECONDS` (default 60) /
+  `BEAT_EVENTS_RELAY_SECONDS` (default 15), in `common.settings`. Each entry `expires` after its
+  own interval so a backed-up broker drops stale ticks instead of piling them up (both tasks are
+  idempotent). Malformed targets fail loudly at import. New `beat` compose service (profile
+  `full`; run exactly one) and `make beat`. 9 unit tests incl. a fresh-interpreter check that
+  env vars actually reach `celery_app.conf.beat_schedule`.
+- **Cursor pagination (Phase 12 deferral).** `app/pagination.py` — keyset over
+  `(sort_key DESC, id DESC)` with an opaque cursor scoped to the endpoint that minted it (a cursor
+  from `/changes` is a 400 on `/issues`). Wired into `/crawls`, `/issues`, `/keywords`,
+  `/anomalies`, `/experiments`, `/geo/visibility`, `/opportunities`, `/changes`. **Backward
+  compatible**: bodies stay bare arrays (the dashboard is unaffected); the next cursor is in the
+  `X-Next-Cursor` header + `Link: rel="next"`; omitting `limit`/`cursor` keeps the legacy full
+  listing (`/crawls` keeps its existing default `limit=20`). `/keywords` already had an object
+  body, so it gains a `next_cursor` field. `/issues` was previously unordered — it is now
+  newest-first. (There is no separate issues router; `/issues` lives in `data.py`.)
+- **`Idempotency-Key` (Phase 12 deferral).** The "helper" that existed was the `job_runs`
+  idempotency ledger (`db.models.runtime.JobRun`, migration 0001) — there was no request-level
+  function, so `app/idempotency.py` is a thin layer over that ledger, not a second store. The
+  ledger row is written in the same transaction as the endpoint's writes: same key + same request
+  → replay (same status, `Idempotent-Replayed: true`); same key + different request → 422; still
+  in flight → 409; a failed request rolls back with its row, so errors are never cached. Ledger
+  key = `api:` + sha256(tenant | scope | client key) — tenants/endpoints can't collide on the
+  globally-unique column and the raw key is never stored. Wired on `POST /projects`,
+  `POST /websites`, `POST /plans/{id}/approve` (a replayed approval neither writes a second
+  `Approval` nor re-signals Temporal).
+- Tests: 21 new unit tests (fake session, no DB) + 4 integration tests on real Postgres (keyset
+  walk with tied scores covers every row exactly once; approve replay writes one `Approval`;
+  failed request doesn't burn the key; cross-tenant key reuse is independent). Full suite run
+  locally against a throwaway PostgreSQL 16 + pgvector with the CI role setup
+  (`infra/db-init/01-init.sql`), migrations up → down → up → `alembic check` clean.
+- Docs: `docs/API.md` conventions updated to what is actually implemented; this "Honest status"
+  table rewritten (it still listed LLM keys, Google OAuth, Tier 2, the dashboard, SerpAPI and the
+  git commit as open — all done, see `CLAUDE.md` / `TOMORROW.md`).
+
 ---
 
 ## Honest status — what "complete" means here
 
-**Built and green (deterministic + offline-testable core of Phases 0–13):** monorepo + CI, DB
-spine with two-layer tenant isolation (RLS `FORCE`, proven + a coverage gate), evidence/provenance
-model, transactional outbox + relay + idempotent consumers + DLQ, logical model roles + router +
-redaction gate, tool registry + `tool_calls`, SSRF-guarded Tier-1 crawler + evidence store,
-33-check technical engine → `seo_issues`, 12-class intent + clustering + SERP intelligence +
-provider abstraction, content intelligence, PostgreSQL knowledge graph + traversal +
-recommendations, opportunity engine (idempotent, evidence-gated), **full safety spine** (structured
-planner + execution/verification/rollback against a real git repo + guardrails + approval API),
-analytics/anomaly/experiment-methodology/learning-loop, GEO citation parser + visibility + AI
-provider abstraction, event-driven autonomous pipeline, read API + Markdown reporting engine,
-consolidated eval scorecards. **11 migrations, ~140 tests.**
+**Built and green:** the deterministic + offline-testable core of Phases 0–13 (monorepo + CI, DB
+spine with RLS `FORCE` tenant isolation + a coverage gate, evidence/provenance, outbox + relay +
+DLQ, model roles + router + redaction, tool registry, SSRF-guarded Tier-1 **and Tier-2
+(Playwright)** crawler, technical/keyword/content/graph/opportunity engines, the full
+plan → approve → execute → verify → rollback safety spine, analytics + experiments + learning
+loop, GEO, the event-driven pipeline **now on a Celery beat timer**, read API with cursor
+pagination + `Idempotency-Key`, reporting, eval scorecards, the Temporal `SeoAgentWorkflow`
+tested against Temporal's test server), **13 migrations**. Also done and verified with real
+calls since this table was first written: LLM provider keys for all roles (Gemini / OpenRouter /
+Zhipu), Google OAuth + per-project encrypted token storage, SerpAPI, the Next.js dashboard, and
+the whole repo committed to git.
 
-**Since the table below was first written (2026-09-12), a second pass closed every *code* gap
-that didn't strictly need a live credential to write: LLM judge + revision loop, Core Web Vitals,
-the hosted GitHub-PR adapter, real GSC/GA4 API calls, GEO prompt library + AI-Overview citation
-tracking + machine-readability checks, the autonomous allow-list widened, and — the durable
-workflow itself — `worker.temporal.SeoAgentWorkflow`, tested against Temporal's real test server.
-What's left below is genuinely credential/infra-gated, not missing code.**
-
-**Not yet built — each needs an external dependency, not just more code:**
-| Area | Blocker |
+**Still open — each needs something outside the code:**
+| Area | Status / blocker |
 |---|---|
-| LLM judge / revision loop actually running (code done, see above) | provider API key (Gemini/OpenRouter free) |
-| Live SERP data, keyword volume/difficulty, competitor rankings | SerpAPI / DataForSEO key |
-| Core Web Vitals actually running (code done, see above) | PageSpeed + CrUX key |
-| Crawler Tier 2 (JS render) / Tier 3 (proxy) | Playwright container / proxy provider |
-| **Hosted** GitHub-PR execution adapter actually running (code done, see above) | a real repo token |
-| Live GSC/GA4 ingestion (API calls done, see above) | Google OAuth + a connected property + per-tenant encrypted token storage (not yet designed) |
-| GEO battery at scale (prompt library done, see above) | provider keys |
-| Durable workflow actually running (code done + test-server-tested, see above) | a real Temporal server (`make up-temporal`, needs Docker) or Temporal Cloud |
-| Next.js dashboard | frontend build wired to the read API — a new application, not a gap in this one |
-| OTel dashboards, security-review pass, load test, launch runbook | Phase 13 hardening + an OTel backend |
+| Core Web Vitals running live (code done) | `PAGESPEED_API_KEY` + `CRUX_API_KEY` (same GCP project as the OAuth client) — `TOMORROW.md` §1 |
+| Hosted GitHub-PR execution adapter running live (code done) | a fine-grained `GITHUB_TOKEN` (Contents + Pull requests: read/write) — `TOMORROW.md` §2 |
+| Durable Temporal workflow running live (code done + test-server-tested) | a real Temporal server. Local `temporalio/auto-setup:1.24.2` crashes on startup (exit 2) even though `db`/`redis`/`minio` come up — not yet root-caused (`TOMORROW.md` "Known issue"); options: plain `postgres:16` for Temporal's DBs, or Temporal Cloud |
+| Crawler Tier 3 (proxy rotation for bot-protected sites) | not built; needs a proxy provider (`PROXY_URL`/credentials) |
+| OTel export + dashboards | exporter hookup + Grafana panels need an OTLP backend endpoint/key |
+| Load test | not run |
+| Backup / restore drill | not run (Neon branch restore is the likely mechanism) |
+| Dedicated security review (write path + crawler + auth) | not done — only the targeted Phase 13 hardening fixes so far |
 
-The architecture, schema, deterministic engines, and the full safety/execution loop are in
-place and tested. Remaining work is integration gated on credentials/infra (`NEEDED-KEYS.md`).
+The architecture, schema, engines and the full safety/execution loop are in place and tested;
+what remains is live-credential/infra integration and the Phase 13 launch-readiness work above.
