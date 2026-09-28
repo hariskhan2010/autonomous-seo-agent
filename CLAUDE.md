@@ -104,9 +104,10 @@ the live free-tier model.
 
 **Remaining is genuinely credential/infra-gated** (TOMORROW.md + docs/BUILD-LOG.md "Honest
 status"): `PAGESPEED_API_KEY` + `CRUX_API_KEY` (same GCP project as the OAuth client, already
-created), a repo token for the Git-PR adapter, and a running Temporal server — locally the
-`temporalio/auto-setup` container crashes on startup (not yet root-caused, see TOMORROW.md) — or
-Temporal Cloud.
+created), a repo token for the Git-PR adapter, and Temporal Cloud for prod. Local Temporal
+(2026-09-29): the crashing `temporalio/auto-setup` image is replaced by the CLI dev server
+(`make up-temporal` in Docker, or `make temporal-dev` with no Docker); the workflow suite passes
+against a real dev server (`WorkflowEnvironment.start_local()`), the Docker image path is untested.
 
 **Secrets baseline**: CI diffs `.secrets.baseline` against a Linux rescan, so it must use POSIX
 paths. If you regenerate it on Windows, convert `\\` → `/` in every filename before committing.

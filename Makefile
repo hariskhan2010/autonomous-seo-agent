@@ -1,8 +1,10 @@
-.PHONY: up down up-temporal sync lint type test migrate api worker beat temporal-worker fmt
+.PHONY: up down up-temporal temporal-dev sync lint type test migrate api worker beat temporal-worker fmt
 
 up:       ; docker compose -f infra/docker-compose.yml up -d db redis minio
-# Adds the self-hosted Temporal dev server + UI (ADR-0003, the durable autonomous loop).
-up-temporal: ; docker compose -f infra/docker-compose.yml up -d db redis minio temporal temporal-ui
+# Adds the Temporal dev server + its UI on :8080 (ADR-0003, the durable autonomous loop).
+up-temporal: ; docker compose -f infra/docker-compose.yml up -d db redis minio temporal
+# Same dev server with no Docker at all — needs the Temporal CLI (https://temporal.io/setup/install-temporal-cli).
+temporal-dev: ; temporal server start-dev --db-filename .temporal-dev.db
 down:     ; docker compose -f infra/docker-compose.yml down
 sync:     ; uv sync
 lint:     ; uv run ruff check .

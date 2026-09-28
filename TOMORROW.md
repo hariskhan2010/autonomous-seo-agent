@@ -50,12 +50,16 @@ same as I did for the Gemini/OpenRouter/Zhipu/Google OAuth/SerpAPI keys already 
 - ~~Git commit~~ — the 254+ never-committed files are now in git (`bf1b30d`, initial commit,
   307 files). `.env` and other secrets confirmed gitignored before committing.
 
-## Known issue (separate from credentials)
+## Local Temporal — replaced (2026-09-29)
 
-Local Temporal (`docker compose -f infra/docker-compose.yml up -d db redis minio temporal
-temporal-ui`) still doesn't come up: `db`/`redis`/`minio` start fine, but the
-`temporalio/auto-setup:1.24.2` container crashes on startup (exit code 2, corrupted/unreadable
-output instead of a normal error) — reproduced across container recreation and a fresh image pull,
-so it's not a caching fluke. Postgres itself logs nothing wrong. Not yet root-caused — options to
-try next: swap the local Postgres image (`pgvector/pgvector:pg16` → plain `postgres:16`) for the
-temporal databases, or use Temporal Cloud instead of running it locally.
+The `temporalio/auto-setup:1.24.2` container used to crash on startup (exit code 2, garbled
+output). That image is deprecated upstream, so it's gone: `temporal` in `infra/docker-compose.yml`
+now runs the Temporal CLI dev server (`server start-dev`, SQLite, UI on http://localhost:8080) and
+no longer touches the app's Postgres. Two ways to run it:
+- `make up-temporal` (Docker), or
+- `make temporal-dev` — no Docker at all, needs the Temporal CLI installed.
+
+Verified: all 5 `SeoAgentWorkflow` tests pass against a real dev server
+(`WorkflowEnvironment.start_local()`). Not yet verified: the Docker image path itself (Docker
+Desktop was off). If Docker containers crash with garbled output again, check free space on C: —
+Docker Desktop's disk lives there and it was down to ~3 GB.

@@ -96,29 +96,16 @@ services:
       db: { condition: service_healthy }
     profiles: ["full"]
 
-  # ADR-0003: the durable autonomous-loop workflow (Phase 11). Self-hosted dev instance — reuses
-  # the `db` Postgres for its own schema (auto-setup creates it). Temporal Cloud replaces this +
-  # `temporal-worker`'s TEMPORAL_ADDRESS override in prod (see NEEDED-KEYS.md).
+  # ADR-0003: the durable autonomous-loop workflow (Phase 11). Dev-only Temporal: the CLI's
+  # `server start-dev` (SQLite-backed, UI built in) — Temporal's recommended local setup. It
+  # replaces `temporalio/auto-setup`, which is deprecated upstream and crashed on startup here
+  # (exit 2, see TOMORROW.md), and no longer shares the app's `db` Postgres. Temporal Cloud
+  # replaces this + `temporal-worker`'s TEMPORAL_ADDRESS override in prod (see NEEDED-KEYS.md).
   temporal:
-    image: temporalio/auto-setup:1.24.2
-    environment:
-      DB: postgres12
-      DB_PORT: 5432
-      POSTGRES_USER: seo
-      POSTGRES_PWD: seo
-      POSTGRES_SEEDS: db
-    ports: ["7233:7233"]
-    depends_on:
-      db: { condition: service_healthy }
-    profiles: ["full"]
-
-  temporal-ui:
-    image: temporalio/ui:2.31.2
-    environment:
-      TEMPORAL_ADDRESS: temporal:7233
-      TEMPORAL_CORS_ORIGINS: http://localhost:3000
-    ports: ["8080:8080"]
-    depends_on: [temporal]
+    image: temporalio/temporal:latest
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/data/temporal.db"]
+    volumes: [temporaldata:/data]
+    ports: ["7233:7233", "8080:8233"]  # gRPC, web UI (http://localhost:8080)
     profiles: ["full"]
 
   temporal-worker:
@@ -134,5 +121,6 @@ services:
     profiles: ["full"]
 
 volumes:
+  temporaldata:
   pgdata:
   miniodata:
